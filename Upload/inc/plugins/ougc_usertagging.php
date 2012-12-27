@@ -33,23 +33,34 @@ defined('IN_MYBB') or die('Direct initialization of this file is not allowed.');
 // Add our hook
 if(!defined('IN_ADMINCP') && defined('THIS_SCRIPT'))
 {
-	// Hooks and definitions
-	if(THIS_SCRIPT == 'xmlhttp.php')
+	global $mybb;
+
+	$page = str_replace('.php', '', THIS_SCRIPT);
+
+	if(THIS_SCRIPT == 'xmlhttp.php' && $mybb->input['action'] == 'edit_post' && $mybb->input['do'] == 'update_post')
 	{
 		$plugins->add_hook('parse_message_end', 'ougc_usertagging_parse_message');
 	}
-	elseif(in_array(str_replace('.php', '', THIS_SCRIPT), array('editpost', 'private', 'newreply', 'newthread', 'showthread')))
+	elseif(in_array($page, array('editpost', 'private', 'newreply', 'newthread', 'showthread')))
 	{
+		$plugins->add_hook('parse_message_end', 'ougc_usertagging_parse_message');
 		$plugins->add_hook('pre_output_page', 'ougc_usertagging_end');
-		$plugins->add_hook('parse_message_end', 'ougc_usertagging_parse_message');
 	}
-	$plugins->add_hook('datahandler_post_update', 'ougc_usertagging_post_update');
-	$plugins->add_hook('datahandler_post_insert_thread_post', 'ougc_usertagging_post_insert');
-	$plugins->add_hook('datahandler_post_insert_post', 'ougc_usertagging_post_insert');
 }
 
+$plugins->add_hook('datahandler_post_update', 'ougc_usertagging_post_update');
+$plugins->add_hook('datahandler_post_insert_thread_post', 'ougc_usertagging_post_insert');
+$plugins->add_hook('datahandler_post_insert_post', 'ougc_usertagging_post_insert');
+
+// MyAlerts integration
+$plugins->add_hook('editpost_do_editpost_end', 'ougc_usertagging_alert');
+$plugins->add_hook('newreply_do_newreply_end', 'ougc_usertagging_alert');
+$plugins->add_hook('newthread_do_newthread_end', 'ougc_usertagging_alert');
+$plugins->add_hook('myalerts_alerts_output_start', 'ougc_usertagging_alert_display');
+$plugins->add_hook('myalerts_possible_settings', 'ougc_usertagging_alert_settings');
+
 // Tag Regex *
-define('OUGC_USERTAGGING_REGEXREGEX', '#(\@(")?)(\w{1,20})[\@|"]#i'); // usertagging
+define('OUGC_USERTAGGING_REGEX', '#(\@(")?)(\w{1,20})[\@|"]#i'); // usertagging
 
 /*
 	'#(\@(")?)(.+?)[\@|"]#i' - usertagging
@@ -79,12 +90,12 @@ function ougc_usertagging_install()
 {
 	global $db;
 
-	$mthod = 'add_column';
+	$method = 'add_column';
 	if($db->field_exists('usertags', 'posts'))
 	{
-		$mthod = 'modify_column';
+		$method = 'modify_column';
 	}
-	$db->$mthod('posts', 'usertags', 'TEXT NOT NULL');
+	$db->$method('posts', 'usertags', 'TEXT NOT NULL');
 }
 
 // _is_installed
@@ -103,15 +114,15 @@ function ougc_usertagging_uninstall()
 	$db->drop_column('posts', 'usertags');
 }
 
-// Parse a message
+// Post parsing
 function ougc_usertagging_parse_message(&$message)
 {
-	// *
 	if(my_strpos($message, '@') !== false)
 	{
+		$message = preg_replace_callback(OUGC_USERTAGGING_REGEX, 'ougc_usertagging_parse_user', $message);
+
 		global $mybb;
-		$message = preg_replace_callback(OUGC_USERTAGGING_REGEXREGEX, 'ougc_usertagging_parse_user', $message);
-		
+
 		if((bool)$mybb->input['ajax'] || THIS_SCRIPT == 'xmlhttp.php')
 		{
 			ougc_usertagging_end($message);
@@ -122,7 +133,6 @@ function ougc_usertagging_parse_message(&$message)
 // Parse a username *
 function ougc_usertagging_parse_user($match)
 {
-	// *
 	if(empty($match[3]) || $match[1] != '@"')
 	{
 		return (!empty($match[0]) ? $match[0] : '');
@@ -133,12 +143,11 @@ function ougc_usertagging_parse_user($match)
 	return '<--@'.$ougc_usertagging->set_tag($match[3]).'-->';
 }
 
-// Replace all placeholders
+// Replace all placeholders *
 function ougc_usertagging_end(&$page)
 {
-	global $ougc_usertagging, $plugins;
+	global $ougc_usertagging;
 
-	// *
 	if(!($tags = $ougc_usertagging->get_tags()))
 	{
 		return;
@@ -172,8 +181,6 @@ function ougc_usertagging_end(&$page)
 		$replacements['replace'][] = '@'.$username;
 	}
 
-	$plugins->run_hooks('ougc_usertagging_end', $replacements);
-
 	if($replacements['search'] && $replacements['replace'])
 	{
 		$page = str_replace($replacements['search'], $replacements['replace'], $page);
@@ -184,15 +191,18 @@ function ougc_usertagging_end(&$page)
 function ougc_usertagging_post_update(&$dh)
 {
 	global $ougc_usertagging, $db;
-	$new_ids = $old_ids = $cache_ids = array();
+	$new_ids = $old_ids = array();
 
 	// Get new post tags
-	$new_message = preg_replace_callback(OUGC_USERTAGGING_REGEXREGEX, 'ougc_usertagging_parse_user', $dh->data['message']);
+	$new_message = preg_replace_callback(OUGC_USERTAGGING_REGEX, 'ougc_usertagging_parse_user', $dh->data['message']);
 
 	$query = $db->simple_select('users', 'uid', 'username IN (\''.implode('\', \'', array_map(array($db, 'escape_string'),  array_keys($ougc_usertagging->get_tags()))).'\')');
 	while($uid = $db->fetch_field($query, 'uid'))
 	{
-		$new_ids[(int)$uid] = (int)$uid;
+		if(($uid = (int)$uid) != $mybb->user['uid'])
+		{
+			$new_ids[$uid] = $uid;
+		}
 	}
 
 	$ougc_usertagging->reset_tags();
@@ -210,44 +220,102 @@ function ougc_usertagging_post_update(&$dh)
 
 	foreach($old_ids as $uid)
 	{
-		isset($new_ids[$uid]) or $ougc_usertagging->remove_tag($uid);
+		isset($new_ids[$uid]) or ($ougc_usertagging->remove_tags[(int)$uid] = (int)$uid);
 	}
 
 	foreach($new_ids as $uid)
 	{
-		isset($old_ids[$uid]) or $ougc_usertagging->add_tag($uid);
+		isset($old_ids[$uid]) or ($ougc_usertagging->add_tags[(int)$uid] = (int)$uid);
 	}
 
-	$dh->post_update_data['usertags'] = implode(',', array_values($new_ids));
+	#$uids = implode(',', array_merge(array_values($new_ids), $old_ids));
+	$uids = implode(',', array_values($new_ids));
+	$dh->post_update_data['usertags'] = $db->escape_string($uids);
+
+	$ougc_usertagging->reset_tags();
 }
 
 // Insert a post and add tags
 function ougc_usertagging_post_insert(&$dh)
 {
 	global $db, $ougc_usertagging, $plugins;
-	$uids = array();
 
 	// Get new post tags
-	$new_message = preg_replace_callback(OUGC_USERTAGGING_REGEXREGEX, 'ougc_usertagging_parse_user', $dh->data['message']);
+	$new_message = preg_replace_callback(OUGC_USERTAGGING_REGEX, 'ougc_usertagging_parse_user', $dh->data['message']);
 
 	$query = $db->simple_select('users', 'uid', 'username IN (\''.implode('\', \'', array_map(array($db, 'escape_string'),  array_keys($ougc_usertagging->get_tags()))).'\')');
 	while($uid = $db->fetch_field($query, 'uid'))
 	{
-		$uids[(int)$uid] = (int)$uid;
+		$ougc_usertagging->add_tags[(int)$uid] = (int)$uid;
 	}
 
-	foreach($uids as $uid)
+	$ougc_usertagging->reset_tags();
+}
+
+// Insert a new reply, send an alert
+function ougc_usertagging_alert()
+{
+	global $postinfo, $Alerts, $ougc_usertagging;
+
+	if(THIS_SCRIPT == 'newreply.php')
 	{
-		$ougc_usertagging->add_tag($uid);
+		$postinfo = $GLOBALS['thread_info'];
+	}
+	elseif(THIS_SCRIPT == 'editpost.php')
+	{
+		$pid = $GLOBALS['posthandler']->pid;
 	}
 
-	$dh->post_insert_data['usertags'] = implode(',', array_values($uids));
+	// post is validated, check at approving-draf
+	if($postinfo['visible'] == 1 && !empty($Alerts) && $Alerts instanceof Alerts && $ougc_usertagging->add_tags)
+	{
+		global $mybb;
+		isset($pid) or ($pid = $postinfo['pid']);
+
+		$uids = array_values($ougc_usertagging->add_tags);
+		$Alerts->addMassAlert($uids, 'ougc_usertagging', $pid, $mybb->user['uid']);
+	}
+}
+
+// Format the alert
+function ougc_usertagging_alert_display(&$alert)
+{
+	global $mybb;
+
+	if($alert['type'] == 'ougc_usertagging' && !empty($mybb->user['myalerts_settings']['ougc_usertagging']))
+	{
+		global $lang;
+		isset($lang->ougc_usertagging_alert) or $lang->ougc_usertagging_alert = '{1} has tagged you in a post.';
+
+		$postlink = $mybb->settings['bburl'].'/'.get_post_link($alert['tid']).'#pid'.$alert['tid'];
+
+		$alert['message'] = $lang->sprintf($lang->ougc_usertagging_alert, $alert['user'], $postlink);
+		$alert['rowType'] = 'ougc_usertagging';
+	}
+}
+
+// Possible alert settings
+function ougc_usertagging_alert_settings(&$settings)
+{
+	global $lang;
+
+	isset($lang->myalerts_setting_ougc_usertagging) or $lang->myalerts_setting_ougc_usertagging = 'Receive an alert when tagged in a post?';
+
+	$settings[] = 'ougc_usertagging';
 }
 
 // Our funny class :P
 class OUGC_UserTagging
 {
+	
+	// Current page tags
 	private $tags = array();
+
+	// Current array of users removed from a post
+	public $remove_tags = array();
+
+	// Current array of users tagged in a post
+	public $add_tags = array();
 
 	// Set a tag to be parsed
 	function set_tag($username)
@@ -271,22 +339,6 @@ class OUGC_UserTagging
 	function reset_tags()
 	{
 		$this->tags = array();
-	}
-
-	// Add a tag hook
-	function add_tag($uid)
-	{
-		global $plugins;
-
-		$plugins->run_hooks('ougc_usertagging_add_tag', $uid);
-	}
-
-	// Remove a tag hook
-	function remove_tag($uid)
-	{
-		global $plugins;
-
-		$plugins->run_hooks('ougc_usertagging_remove_tag', $uid);
 	}
 }
 $GLOBALS['ougc_usertagging'] = new OUGC_UserTagging;
